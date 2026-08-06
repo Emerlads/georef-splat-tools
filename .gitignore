@@ -1,0 +1,39 @@
+# Never commit credentials
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+*.pem
+*.key
+
+# Data — keep the repo about the code
+runs/
+sites/
+*.ply
+*.laz
+*.las
+*.copc.laz
+*.spz
+tileset*/
+splats/
+images/
+*.JPG
+*.jpg
+*.png
+*.tif
+*.tiff
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
