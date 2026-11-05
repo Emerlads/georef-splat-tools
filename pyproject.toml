@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "georef-splat"
+version = "0.2.0"
+description = "Georeference drone SfM and Gaussian splats; export SPZ 3D Tiles for CesiumJS"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Roberto Bloom" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pillow>=10"]
+
+[project.optional-dependencies]
+colmap = ["pycolmap>=3.10"]
+zones = ["scipy>=1.10"]
+test = ["pytest>=8", "scipy>=1.10"]
+
+[project.scripts]
+georef-splat = "georef_splat.cli:main"
+
+[tool.setuptools]
+packages = ["georef_splat"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
