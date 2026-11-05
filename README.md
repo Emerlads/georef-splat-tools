@@ -1,111 +1,124 @@
-# georef-splat-tools
+# georef-splat
 
-Command-line tools for taking GPS-tagged drone imagery through Structure-from-Motion into a **georeferenced** Gaussian splat that renders in the browser at true world coordinates.
+[![tests](https://github.com/Emerlads/georef-splat-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/Emerlads/georef-splat-tools/actions/workflows/ci.yml)
 
-Commercial photogrammetry suites do this behind a closed pipeline. These tools do it with open tooling, so every stage is inspectable and the resulting accuracy is *measured* rather than asserted.
+Put a drone Gaussian splat at its true latitude, longitude and height, then **measure** how right that is.
 
----
-
-## The actual problem
-
-Structure-from-Motion gives you camera poses in an arbitrary local frame at arbitrary scale. A splat trained on that model is geometrically self-consistent and geospatially meaningless — it has no idea where on Earth it is or how large it is.
-
-Bridging that gap is the interesting part, and it's where most of this code lives:
+**Live demo: [emerlads.github.io/splat-to-earth](https://emerlads.github.io/splat-to-earth/).** It uses public CC0 drone data, a CesiumJS viewer, and a vertical-datum toggle.
 
 ```
-GPS-tagged imagery
-   ↓  select_gps_image_subset.py          spatially diverse subset selection
-   ↓  prepare_colmap_images.py            deterministic image set
-   ↓  COLMAP / pycolmap                   solve camera poses (arbitrary frame)
-   ↓  align_colmap_to_exif_gps_enu.py     ← Sim3 fit: poses → EXIF GPS, local ENU metres
-   ↓  compute_georef_residuals.py         ← measure what that alignment actually achieved
-   ↓  Nerfstudio splatfacto               train on the ENU-aligned model
-   ↓  decimate_binary_ply.py              reduce for delivery
-   ↓  create_axis_fixed_tileset.py        3D Tiles with corrected axis convention
-   ↓  CesiumJS                            render at true lat/lon/elevation
+GPS-tagged photos
+  → COLMAP SfM
+  → georef-splat align      RANSAC Sim3 onto EXIF GPS, local East-North-Up metres
+  → Nerfstudio splatfacto   train in the aligned frame
+  → georef-splat tiles      ENU → glTF → SPZ v2 → 3D Tiles 1.1 (KHR_gaussian_splatting)
+  → CesiumJS                root transform = ENU→ECEF at the origin
 ```
 
-Alignment happens **before** training, not after. Training on an already-metric model means the output is measurable by construction rather than being scaled into place afterward.
+## Results on public data
 
----
+[OpenDroneMap `odm_data_aukerman`](https://github.com/OpenDroneMap/odm_data_aukerman) is 77 photos from a 2016 Sony DSC-WX220, flown about 100 m above ground in Ohio.
 
-## Coordinate handling
+| Measure | Value | What it means |
+|---|---|---|
+| Cameras registered | 76 / 77 | COLMAP, 1.24 px mean reprojection error |
+| Camera fit residual | 0.93 m H, 0.84 m V | Solved cameras vs the GPS they were fitted to. A QA number, **not** accuracy |
+| Vertical vs USGS 3DEP lidar | −1.27 m bias, 1.46 m RMSE (44 pts) | Independent: SfM ground vs bare-earth lidar + NOAA GEOID18 |
+| Vertical, 3DEP-anchored | 0.74 m RMSE | Bias fitted on half the checkpoints, scored on the other half |
+| Same model, geoid misapplied | −35.2 m | What happens if ellipsoidal GPS height is treated as sea level |
 
-`align_colmap_to_exif_gps_enu.py` does the geodesy explicitly rather than delegating it:
+Horizontal accuracy against independent control is not claimed. It needs surveyed GCPs.
 
-- EXIF GPS rationals → decimal degrees (`dms_to_degrees`)
-- Geodetic → ECEF on the WGS84 ellipsoid (`geodetic_to_ecef`)
-- ECEF → local ENU via the rotation matrix at the scene origin (`ecef_to_enu_matrix`)
-- Similarity (Sim3) fit of solved camera centres onto those ENU positions, recovering scale, rotation, and translation
+## Splat geometry audit: can you measure off a splat?
 
-The output is a COLMAP model whose units are metres in a local ENU frame — directly consumable by Nerfstudio.
+Gaussian splats are optimised for appearance. On low-texture surfaces they often get the colour right at the wrong depth. `georef-splat audit` renders the splat straight down by alpha compositing (as a viewer would) and compares that surface, cell by cell, with a multi-view-stereo cloud from the same photos. Where available, it also compares against lidar.
 
-**A note on vertical datums.** GPS altitude is height above the WGS84 *ellipsoid*, not above mean sea level. Conflating the two puts models tens of metres off vertically, and it does so silently because the horizontal fit still looks perfect. Anything comparing against MSL-referenced terrain needs an explicit geoid correction.
+On Aukerman, with both surfaces checked against 3DEP lidar at the same independent ground checkpoints:
 
----
+| Surface | vs 3DEP lidar | Notes |
+|---|---|---|
+| COLMAP multi-view stereo | +0.48 m median, 0.72 m RMSE (n=36) | |
+| Gaussian splat, standard sparse-point init | +8.5 m median, 19.1 m RMSE (n=26) | 70% of its surface floats > 2.5 m above the stereo surface |
+| Gaussian splat, initialised from stereo | +3.2 m median, 9.8 m RMSE (n=22) | 54% floating, from the same photos and settings |
 
-## On accuracy claims
+The splat looks like a clean orthophoto from above. Its geometry is not fit for measurement. Seeding it from the stereo cloud (`examples/aukerman/mvs_init_points.py`) halves the error, but that's still metres. So measure from stereo and show the splat.
 
-`compute_georef_residuals.py` emits horizontal and vertical residuals as RMSE, median, and p90, and stamps every output with:
+```bash
+georef-splat audit --ply splat.ply --points dense/fused.ply --manifest georeference_manifest.json \
+    --crop-to-cameras 25 --clip-above-ground 32 --ground 3dep --ground-offset -1.27 --out audit/
+```
 
-> `"note": "Camera-prior fit residual, not independent surveyed GCP/checkpoint error."`
+## Defensible-space screening
 
-That distinction matters and is routinely blurred. A camera-prior fit residual measures how well the solved cameras agree with the GPS priors they were fitted to — it is not an independent accuracy assessment. Genuine accuracy validation requires surveyed checkpoints that were withheld from the fit.
+`georef-splat zones` grids a georeferenced surface (stereo points or a splat), takes bare earth from USGS 3DEP if asked (with a smooth local offset correction), and classifies each cell as ground, low vegetation, shrub / tall grass, tree canopy, structure or raised object. It finds structures with no footprint data and measures fuel in California's Zone 0 / 1 / 2 rings (5 / 30 / 100 ft). Outputs are GeoJSON for ArcGIS or QGIS, a classification PNG and a summary. `examples/aukerman/evidence_chips.py` adds the source photo that best shows each structure, with the footprint projected onto it.
 
-Consumer GPS priors are also weak targets — metre-level at best. RTK positions or surveyed ground control should replace them when available, and the tooling is structured to accept that substitution.
+Structures must stand above their *own surroundings*, not just above the lidar ground. That rule removed a raised footpath that otherwise passed every other test. Small "woody" patches with weak average greenness become objects (on Aukerman: picnic tables), which in Zone 0 is its own flag.
 
-Reported honestly, these numbers are useful for QA and regression tracking. Reported as "accuracy," they'd be overselling.
+## The vertical datum trap
 
----
+GPS altitude can be height above the WGS84 **ellipsoid** or above **mean sea level** (the geoid). EXIF doesn't say which, and vendors differ. At Aukerman the two are 33.9 m apart. Getting it wrong moves the model by the full geoid height, while the horizontal fit still looks perfect.
 
-## Tools
+`examples/aukerman/vertical_check.py` settles it empirically. It takes SfM ground points, converts them to geodetic coordinates, and compares them with USGS 3DEP bare-earth elevation plus the GEOID18 undulation. For this camera, the heights are ellipsoidal.
 
-| Tool | Purpose |
+## Install
+
+```bash
+pip install -e ".[colmap,test]"
+pytest -q
+```
+
+## Use
+
+```bash
+georef-splat align --model colmap/sparse/0 --images images --output colmap/sparse_enu/0 \
+    --manifest georeference_manifest.json
+# if your drone writes MSL altitude: --altitude-datum orthometric --geoid-undulation <N>
+
+ns-train splatfacto colmap --data . --colmap-path colmap/sparse_enu/0 \
+    --orientation-method none --center-method none --auto-scale-poses False \
+    --assume-colmap-world-coordinate-convention False
+ns-export gaussian-splat --load-config <run>/config.yml --output-dir export
+
+georef-splat tiles --ply export/splat.ply --manifest georeference_manifest.json \
+    --out tiles --max-splats 1200000
+```
+
+Nerfstudio must not re-centre, re-orient or re-scale the poses. Otherwise the trained splat leaves the ENU frame.
+
+The full Aukerman reproduction is in [`examples/aukerman/`](examples/aukerman/).
+
+## What's inside
+
+| Module | |
 |---|---|
-| `align_colmap_to_exif_gps_enu.py` | Sim3 alignment of a COLMAP model to EXIF GPS in local ENU metres |
-| `compute_georef_residuals.py` | Horizontal/vertical residual statistics with an explicit methodology note |
-| `select_gps_image_subset.py` | Select images by GPS proximity to a target area |
-| `select_diverse_gps_image_subset.py` | Spatially diverse subset selection to avoid clustered viewpoints |
-| `prepare_colmap_images.py` | Build a deterministic, reproducible COLMAP image set |
-| `decimate_binary_ply.py` | Reduce Graphdeco-style binary PLY splats for delivery |
-| `create_axis_fixed_tileset.py` | Emit 3D Tiles with corrected axis convention |
-| `build_source_image_index.py` | Index source imagery for nearest-source-image lookup in the viewer |
+| `geodesy.py` | WGS84 geodetic ↔ ECEF ↔ ENU, ENU→ECEF 4×4 (same as Cesium `eastNorthUpToFixedFrame`) |
+| `sim3.py` | Umeyama similarity + RANSAC, residual statistics |
+| `exif.py` | EXIF GPS reader (altitude datum deliberately left unspecified) |
+| `ply.py` | 3DGS PLY read/write |
+| `tiles.py` | SPZ v2 encoder (with SH up to degree 3), glTF `KHR_gaussian_splatting` + `KHR_gaussian_splatting_compression_spz_2` writer, 3D Tiles 1.1 tileset |
+| `audit.py` | Splat-vs-reference surface audit (alpha-composited nadir render vs MVS / lidar) |
+| `zones.py` | Surface gridding, local lidar ground correction, classification, Zone 0/1/2 screening |
+| `usgs.py` | USGS 3DEP bare-earth export and NOAA GEOID18 lookups |
+| `tools/` | Earlier single-file scripts (image subset selection, decimation, axis-fix) kept for reference |
 
-Every tool is argparse-driven with no hardcoded paths.
+Tests cover:
+- geodesy round-trips and axis directions
+- Sim3 recovery under outliers
+- SPZ round-trips, spherical harmonics included, through an independent decoder
+- an end-to-end check that a tile's content lands at the right ECEF position
+- audit detection of a floating layer
+- zone screening on a synthetic house, tree and shrubs
 
----
+Design note: data stays in local ENU, and the glTF node carries the ENU→glTF axis change. The renderer then rotates positions, orientations and spherical harmonics together, so no Wigner-D rotation is needed in the converter.
 
-## Requirements
+Lessons from Aukerman are built into the defaults and documented in the code:
+- Down-sampling by splat size keeps blurry splats.
+- Down-sampling by opacity deletes lawns.
+- Opacity-weighted random sampling keeps coverage even.
+- CesiumJS also needs `3DTILES_content_gltf` declared on the tileset, or it draws splats as points.
 
-```
-numpy
-pillow
-pycolmap
-```
-
-Plus COLMAP and Nerfstudio for the reconstruction and training stages.
-
----
-
-## Results from production use
-
-Applied to real drone captures, this pipeline produced:
-
-- **0.107 m horizontal GPS residual** across 119 of 120 solved cameras on a target subset
-- **0.24 m 3D georeferencing RMSE**, surfaced in-app as a per-reconstruction QA readout
-- A 109k-Gaussian scene compressed to roughly 7.4 MB for practical browser delivery
-
-Both figures are camera-prior fit residuals under the caveat above.
+Limitations: a single tile with no LOD; zone thresholds are parameters, not standards.
 
 ---
 
-## Scope
-
-These are the georeferencing and preparation tools only. The viewer application, classification system, and client data are not part of this repository.
-
-Published with permission. No client data, site identifiers, or proprietary application code is included.
-
----
-
-**Roberto Bloom** — Geospatial Software Engineer, FAA Part 107
-[LinkedIn](https://linkedin.com/in/roberto-bloom)
+**Roberto Bloom**, Geospatial Software Engineer and FAA Part 107 remote pilot · [emerlads.github.io](https://emerlads.github.io) · [LinkedIn](https://linkedin.com/in/roberto-bloom)
