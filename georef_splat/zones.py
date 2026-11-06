@@ -30,7 +30,7 @@ ZONES = (("zone0", 0.0, 5 * FT), ("zone1", 5 * FT, 30 * FT), ("zone2", 30 * FT, 
 
 GROUND, LOWVEG, SHRUB, TREE, STRUCTURE, OBJECT = 0, 1, 2, 3, 4, 5
 CLASS_NAMES = {GROUND: "ground", LOWVEG: "low vegetation", SHRUB: "shrub / tall grass", TREE: "tree canopy",
-               STRUCTURE: "structure", OBJECT: "raised object (not vegetation)"}
+               STRUCTURE: "structure", OBJECT: "raised non-green (dry vegetation or objects)"}
 
 
 @dataclass
@@ -350,6 +350,9 @@ def screen_structures(g: Grid, p: Params) -> list[dict]:
     results = []
     for i in range(1, n + 1):
         m = lab == i
+        # Eaves-fringe merging can leave detached slivers labelled as structure.
+        if m.sum() * g.cell**2 < p.structure_min_area:
+            continue
         cells = np.stack([cx[m], cy[m]], 1)
         # Footprint corners rather than centres, so the hull covers whole cells.
         off = g.cell / 2 * np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]])
@@ -381,12 +384,16 @@ def screen_structures(g: Grid, p: Params) -> list[dict]:
         if z1["shrub_cover_pct"] > 15:
             flags.append(f"Shrub / tall grass in Zone 1 ({z1['shrub_cover_pct']}%)")
         if z0["object_cover_pct"] > 2:
-            flags.append(f"Raised non-vegetation objects in Zone 0 ({z0['object_cover_pct']}%): check for combustibles")
+            flags.append(f"Raised non-green material in Zone 0 ({z0['object_cover_pct']}%): dry vegetation or stored objects; check for combustibles")
         if z0["observed_pct"] < 60:
             flags.append("Zone 0 poorly observed; capture more obliques")
         roof = g.dsm[foot & g.valid]
         results.append({
-            "id": i,
+            "id": len(results) + 1,
+            # Ranking score for triage (not a risk model): Zone 0 fuel counts most.
+            "score": round(3 * z0["woody_cover_pct"] + 2 * z0["object_cover_pct"]
+                           + 1.0 * z1["tree_cover_pct"] + 1.0 * z1["shrub_cover_pct"]
+                           + 0.25 * (zones["zone2"]["tree_cover_pct"] + zones["zone2"]["shrub_cover_pct"]), 1),
             "footprint_enu": hull.round(2).tolist(),
             "footprint_area_m2": round(float(foot.sum()) * g.cell**2, 1),
             "height_m": round(float(np.percentile(g.ndsm[m], 90)), 1),
@@ -395,7 +402,7 @@ def screen_structures(g: Grid, p: Params) -> list[dict]:
             "zones": zones,
             "flags": flags,
             "priority": ("review" if any(f.startswith("Woody vegetation in Zone 0") for f in flags)
-                         or sum(not f.startswith(("Zone 0 poorly", "Raised non-vegetation")) for f in flags) >= 2
+                         or sum(not f.startswith(("Zone 0 poorly", "Raised non-green")) for f in flags) >= 2
                          else ("watch" if flags else "ok")),
         })
     return results

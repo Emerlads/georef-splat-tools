@@ -29,6 +29,23 @@ GPS-tagged photos
 
 Horizontal accuracy against independent control is not claimed. It needs surveyed GCPs.
 
+### Photoreal splats from commercial trainers (LA County Arboretum)
+
+Most production splats come from Postshot, RealityScan and similar tools. They export in their own local frame, often with swapped axes. `examples/botanical/georef_trainer_splat.py` georeferences such a splat using only what those tools export:
+1. Recover the splat-to-grid frame by testing all 24 axis rotations against the trainer's dense cloud.
+2. Refine with trimmed ICP.
+3. Chain a RANSAC Sim3 from the grid-frame cameras to GPS in ENU.
+
+On a 2,046-photo DJI Mavic 3M RTK survey (2.99M-splat UHD model, used with permission):
+
+| Measure | Value |
+|---|---|
+| Splat → grid frame | axes (x, z, −y), scale 0.998 |
+| Camera fit vs raw EXIF GPS | 0.09 m H, 0.50 m V (2,046 cameras) |
+| Vertical vs USGS 3DEP lidar | −0.42 m bias, 0.72 m RMSE (59 checkpoints) |
+| 3DEP-anchored, held out | 0.59 m RMSE |
+| Altitude datum | ellipsoidal (treating it as MSL: −34.25 m) |
+
 ## Splat geometry audit: can you measure off a splat?
 
 Gaussian splats are optimised for appearance. On low-texture surfaces they often get the colour right at the wrong depth. `georef-splat audit` renders the splat straight down by alpha compositing (as a viewer would) and compares that surface, cell by cell, with a multi-view-stereo cloud from the same photos. Where available, it also compares against lidar.

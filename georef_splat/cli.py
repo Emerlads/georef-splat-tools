@@ -142,6 +142,38 @@ def cmd_tiles(a: argparse.Namespace) -> None:
     print(json.dumps(summary, indent=1))
 
 
+def _ortho_chips(g, structures, out: Path, margin_m: float = 14.0, size: int = 480) -> None:
+    """Per-structure evidence chips cut from the gridded orthophoto, with footprint and rings drawn."""
+    from PIL import Image, ImageDraw
+
+    from .zones import FT, buffer_convex
+
+    out.mkdir(parents=True, exist_ok=True)
+    rgb = (np.clip(g.rgb, 0, 1) * 255).astype(np.uint8)
+    ny, nx = g.dsm.shape
+    for st in structures:
+        hull = np.array(st["footprint_enu"])
+        lo, hi = hull.min(0) - margin_m, hull.max(0) + margin_m
+        half = max(hi - lo) / 2
+        c = (lo + hi) / 2
+        x0, x1 = int((c[0] - half - g.x0) / g.cell), int((c[0] + half - g.x0) / g.cell)
+        y0, y1 = int((c[1] - half - g.y0) / g.cell), int((c[1] + half - g.y0) / g.cell)
+        x0, y0 = max(x0, 0), max(y0, 0)
+        x1, y1 = min(x1, nx), min(y1, ny)
+        crop = rgb[y0:y1, x0:x1][::-1]  # north-up
+        im = Image.fromarray(crop).resize((size, size), Image.LANCZOS)
+        sx, sy = size / max(x1 - x0, 1), size / max(y1 - y0, 1)
+        def px(pts):
+            return [((x - g.x0) / g.cell - x0) * sx for x in pts[:, 0]], [(y1 - (y - g.y0) / g.cell) * sy for y in pts[:, 1]]
+        d = ImageDraw.Draw(im)
+        for r, col in ((30 * FT, (240, 170, 40)), (5 * FT, (230, 70, 60))):
+            xs, ys = px(buffer_convex(hull, r))
+            d.line(list(zip(xs, ys)) + [(xs[0], ys[0])], fill=col, width=2)
+        xs, ys = px(hull)
+        d.line(list(zip(xs, ys)) + [(xs[0], ys[0])], fill=(255, 255, 255), width=3)
+        im.save(out / f"structure_{st['id']}.jpg", quality=85)
+
+
 def cmd_zones(a: argparse.Namespace) -> None:
     from PIL import Image
 
@@ -226,6 +258,8 @@ def cmd_zones(a: argparse.Namespace) -> None:
     }
     (out / "zones_summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     (out / "footprints_enu.json").write_text(json.dumps({st["id"]: st["footprint_enu"] for st in structures}), encoding="utf-8")
+    if a.chips:
+        _ortho_chips(g, structures, out / "chips")
     print(f"{len(structures)} structures; classes {counts}")
     for st in structures:
         print(f"  #{st['id']}: {st['footprint_area_m2']} m2, {st['height_m']} m tall, {st['priority']}: {'; '.join(st['flags']) or 'no flags'}")
@@ -337,6 +371,7 @@ def main(argv=None) -> None:
     z.add_argument("--max-splat-size", type=float, default=4.0)
     z.add_argument("--ground", choices=["splat", "3dep"], default="splat",
                    help="bare-earth source: opening of the splat surface, or USGS 3DEP lidar (US only)")
+    z.add_argument("--chips", action="store_true", help="write per-structure orthophoto evidence chips")
     z.add_argument("--ground-offset", type=float, default=0.0,
                    help="reconstruction minus 3DEP vertical bias (m), e.g. from vertical_check.py")
     z.set_defaults(func=cmd_zones)
